@@ -1,0 +1,521 @@
+#include <X11/Xlib.h>
+#include <X11/Xutil.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+#include <unistd.h>
+
+#define GRID_SIZE 8
+#define CELL_SIZE 50
+#define BUTTON_WIDTH 400
+#define BUTTON_HEIGHT 150
+
+typedef struct {
+    int grid[GRID_SIZE][GRID_SIZE];
+    int shipsRemaining;
+    int lastHitX;
+    int lastHitY;
+    int lastHitSuccess;
+} Player;
+
+void initializeGrid(Player *player);
+void placeShips(Player *player);
+void drawGrid(Display *display, Window window, GC gc, Player *player, int offsetX, int offsetY, const char *playerName);
+void drawCell(Display *display, Window window, GC gc, int x, int y, unsigned long color);
+int handleAttack(Player *attacker, Player *defender, int x, int y);
+int checkGameOver(Player *player);
+int aiAttack(Player *player);
+void displayWinScreen(Display *display, Window window, GC gc, const char *message);
+int waitForExit(Display *display, Window window);
+void displayAttackMessage(Display *display, Window window, GC gc, const char *message);
+
+int main() {
+    Display *display;
+    Window window;
+    GC gc;
+    int screen;
+    Player player, ai;
+
+    srand(time(NULL));
+
+    initializeGrid(&player);
+    initializeGrid(&ai);
+    placeShips(&player);
+    placeShips(&ai);
+
+    display = XOpenDisplay(NULL);
+    screen = DefaultScreen(display);
+
+    int winWidth = DisplayWidth(display, screen);
+    int winHeight = DisplayHeight(display, screen);
+
+    window = XCreateSimpleWindow(display, RootWindow(display, screen), 0, 0, winWidth, winHeight, 1,
+                                 BlackPixel(display, screen), WhitePixel(display, screen));
+    XSelectInput(display, window, ExposureMask | ButtonPressMask);
+    XMapWindow(display, window);
+    gc = XCreateGC(display, window, 0, NULL);
+
+    int menuChoice = displayMainMenu(display, window, gc);
+    if (menuChoice == 0) {  // "Exit" seçeneği
+        XFreeGC(display, gc);
+        XDestroyWindow(display, window);
+        XCloseDisplay(display);
+        return 0;
+    }
+    // Oyun tahtası penceresini oluştur
+    Window gameWindow = XCreateSimpleWindow(display, RootWindow(display, screen), 0, 0, winWidth, winHeight, 1,
+                                            BlackPixel(display, screen), WhitePixel(display, screen));
+    XSelectInput(display, gameWindow, ExposureMask |ButtonPressMask);
+    XMapWindow(display, gameWindow);
+
+    // Ana menü penceresini kapat
+    XUnmapWindow(display, window);
+    
+    int gameOver = 0;
+
+    while (!gameOver) {
+        int hit = 1;
+
+        while (hit) {
+            drawGrid(display, gameWindow, gc, &player, 200, 200, "Player 1");
+            drawGrid(display, gameWindow, gc, &ai, 1300, 200, "Player 2");
+            XFlush(display);
+            sleep(1);
+
+            int x = rand() % GRID_SIZE;
+            int y = rand() % GRID_SIZE;
+            hit = handleAttack(&player, &ai, x, y);
+
+            char message[100];
+            snprintf(message, sizeof(message), "Player 1 attacks (%d, %d): %s", x+1, y+1, hit ? "Hit" : "Miss");
+            displayAttackMessage(display, gameWindow, gc, message);
+
+            if (checkGameOver(&ai)) {
+                displayWinScreen(display, gameWindow, gc, "Player 1 Wins!");
+                gameOver = 1;
+                break;
+            }
+        }
+
+        if (gameOver) break;
+
+        hit = 1;
+        while (hit) {
+            drawGrid(display, gameWindow, gc, &player, 200, 200, "Player 1");
+            drawGrid(display, gameWindow, gc, &ai, 1300, 200, "Player 2");
+            XFlush(display);
+            sleep(1);
+
+            int x = rand() % GRID_SIZE;
+            int y = rand() % GRID_SIZE;
+            hit = handleAttack(&ai, &player, x, y);
+
+            char message[100];
+            snprintf(message, sizeof(message), "Player 2 attacks (%d, %d): %s", x+1, y+1, hit ? "Hit" : "Miss");
+            displayAttackMessage(display, gameWindow, gc, message);
+
+            if (checkGameOver(&player)) {
+                displayWinScreen(display, gameWindow, gc, "Player 2 Wins!");
+                gameOver = 1;
+                break;
+            }
+        }
+    }
+
+    waitForExit(display, window);
+    main();
+    XFreeGC(display, gc);
+    XDestroyWindow(display, window);
+    XCloseDisplay(display);
+
+    return 0;
+}
+
+
+int displayMainMenu(Display *display, Window window, GC gc) {
+    XSetForeground(display, gc, 0x000080);  // Koyu mavi arka plan
+    XFillRectangle(display, window, gc, 0, 0, DisplayWidth(display, DefaultScreen(display)), DisplayHeight(display, DefaultScreen(display)));
+
+    const char *title = "Battle Ship Game";
+    const char *newGameText = "New Game";
+    const char *exitText = "Exit";
+
+    XFontStruct *titleFont = XLoadQueryFont(display, "-*-helvetica-bold-r-normal--34-*-*-*-*-*-*-*");
+    XFontStruct *buttonFont = XLoadQueryFont(display, "-*-helvetica-bold-r-normal--24-*-*-*-*-*-*-*");
+
+    if (!titleFont) titleFont = XLoadQueryFont(display, "fixed");
+    if (!buttonFont) buttonFont = XLoadQueryFont(display, "fixed");
+
+    int screenWidth = DisplayWidth(display, DefaultScreen(display));
+    int screenHeight = DisplayHeight(display, DefaultScreen(display));
+
+    int buttonX = (screenWidth - BUTTON_WIDTH) / 2;
+    int newGameButtonY = screenHeight / 2 - BUTTON_HEIGHT;
+    int exitButtonY = screenHeight / 2 + BUTTON_HEIGHT;
+
+    while (1) {
+        XEvent event;
+        XNextEvent(display, &event);
+
+        if (event.type == Expose) {
+            XSetForeground(display, gc, 0x000080);
+            XFillRectangle(display, window, gc, 0, 0, screenWidth, screenHeight);
+
+            if (titleFont) {
+                XSetFont(display, gc, titleFont->fid);
+                int titleWidth = XTextWidth(titleFont, title, strlen(title));
+                int titleX = (screenWidth - titleWidth) / 2;
+                int titleY = screenHeight / 4;
+
+                XSetForeground(display, gc, 0xFFFFFF);
+                XDrawString(display, window, gc, titleX, titleY, title, strlen(title));
+            }
+
+            XSetForeground(display, gc, 0x00FF00);  
+            XFillRectangle(display, window, gc, buttonX, newGameButtonY, BUTTON_WIDTH, BUTTON_HEIGHT);
+            XSetForeground(display, gc, 0x000000);
+            XDrawRectangle(display, window, gc, buttonX, newGameButtonY, BUTTON_WIDTH, BUTTON_HEIGHT);
+
+            XSetForeground(display, gc, 0xFF0000);  
+            XFillRectangle(display, window, gc, buttonX, exitButtonY, BUTTON_WIDTH, BUTTON_HEIGHT);
+            XSetForeground(display, gc, 0x000000);
+            XDrawRectangle(display, window, gc, buttonX, exitButtonY, BUTTON_WIDTH, BUTTON_HEIGHT);
+
+            if (buttonFont) {
+                XSetFont(display, gc, buttonFont->fid);
+                XSetForeground(display, gc, 0x000000);
+
+                int newGameTextWidth = XTextWidth(buttonFont, newGameText, strlen(newGameText));
+                int newGameTextX = buttonX + (BUTTON_WIDTH - newGameTextWidth) / 2;
+                int newGameTextY = newGameButtonY + (BUTTON_HEIGHT + buttonFont->ascent) / 2;
+                XDrawString(display, window, gc, newGameTextX, newGameTextY, newGameText, strlen(newGameText));
+
+                int exitTextWidth = XTextWidth(buttonFont, exitText, strlen(exitText));
+                int exitTextX = buttonX + (BUTTON_WIDTH - exitTextWidth) / 2;
+                int exitTextY = exitButtonY + (BUTTON_HEIGHT + buttonFont->ascent) / 2;
+                XDrawString(display, window, gc, exitTextX, exitTextY, exitText, strlen(exitText));
+            }
+        }
+
+        if (event.type == ButtonPress) {
+            int x = event.xbutton.x;
+            int y = event.xbutton.y;
+
+            if (x >= buttonX && x <= buttonX + BUTTON_WIDTH &&
+                y >= newGameButtonY && y <= newGameButtonY + BUTTON_HEIGHT) {
+                return 1;  // Yeni oyun başlat
+            }
+
+            if (x >= buttonX && x <= buttonX + BUTTON_WIDTH &&
+                y >= exitButtonY && y <= exitButtonY + BUTTON_HEIGHT) {
+                return 0;  // Çıkış
+            }
+        }
+    }
+
+    if (titleFont) XUnloadFont(display, titleFont->fid);
+    if (buttonFont) XUnloadFont(display, buttonFont->fid);
+
+    return -1;
+}
+
+void displayAttackMessage(Display *display, Window window, GC gc, const char *message) {
+    XClearArea(display, window, 0, 800, DisplayWidth(display, DefaultScreen(display)), 100, False);
+
+    XFontStruct *font = XLoadQueryFont(display, "fixed");
+    if (!font) font = XLoadQueryFont(display, "6x13");
+
+    if (font) {
+        XSetFont(display, gc, font->fid);
+        XSetForeground(display, gc, 0x000000);
+        int textWidth = XTextWidth(font, message, strlen(message));
+        int textX = (DisplayWidth(display, DefaultScreen(display)) - textWidth) / 2;
+        int textY = 850;
+        XDrawString(display, window, gc, textX, textY, message, strlen(message));
+        XUnloadFont(display, font->fid);
+    }
+}
+void startGame(Display *display, Window window, GC gc) {
+    Player player, ai;
+    initializeGrid(&player);
+    initializeGrid(&ai);
+    placeShips(&player);
+    placeShips(&ai);
+
+    int gameOver = 0;
+    while (!gameOver) {
+        int hit = 1;
+        while (hit) {
+            drawGrid(display, window, gc, &player, 50, 50,"AI 2");
+            drawGrid(display, window, gc, &ai, 350, 50,"AI 1");
+            XFlush(display);
+            sleep(1);
+            
+            hit = aiAttack(&player);
+            if (checkGameOver(&player)) {
+                displayWinScreen(display, window, gc, "AI 2 Wins!");
+                gameOver = 1;
+                break;
+            }
+        }
+        
+        if (gameOver) break;
+
+        hit = 1;
+        while (hit) {
+            drawGrid(display, window, gc, &player, 50, 50,"AI 2");
+            drawGrid(display, window, gc, &ai, 350, 50,"AI 1");
+            XFlush(display);
+            sleep(1);
+            
+            hit = aiAttack(&ai);
+            if (checkGameOver(&ai)) {
+                displayWinScreen(display, window, gc, "AI 1 Wins!");
+                gameOver = 1;
+                break;
+            }
+        }
+    }
+
+    waitForExit(display, window);  // Bitince ana menüye geri dönecek
+}
+
+void initializeGrid(Player *player) {
+    for (int i = 0; i < GRID_SIZE; i++) {
+        for (int j = 0; j < GRID_SIZE; j++) {
+            player->grid[i][j] = 0;
+        }
+    }
+    player->shipsRemaining = 14;
+    player->lastHitSuccess = 0;
+}
+
+void placeShips(Player *player) {
+    int ships[] = {4, 3, 3, 2, 2};  // Gemi uzunlukları: 1 adet 4, 2 adet 3, 2 adet 2
+    for (int s = 0; s < 5; s++) {
+        int length = ships[s];
+        int placed = 0;
+
+        while (!placed) {
+            int x = rand() % GRID_SIZE;
+            int y = rand() % GRID_SIZE;
+            int direction = rand() % 2; // 0: yatay, 1: dikey
+            int valid = 1;
+
+            if (direction == 0) {  // Yatay yerleştirme
+                if (x + length <= GRID_SIZE) {  // Tahtadan taşmayacaksa
+                    for (int i = -1; i <= length; i++) {
+                        for (int j = -1; j <= 1; j++) {
+                            int checkX = x + i;
+                            int checkY = y + j;
+                            if (checkX >= 0 && checkX < GRID_SIZE && checkY >= 0 && checkY < GRID_SIZE) {
+                                if (player->grid[checkX][checkY] != 0) {
+                                    valid = 0;
+                                }
+                            }
+                        }
+                    }
+                    if (valid) {
+                        for (int i = 0; i < length; i++) {
+                            player->grid[x + i][y] = 1;
+                        }
+                        placed = 1;
+                    }
+                }
+            } else {  // Dikey yerleştirme
+                if (y + length <= GRID_SIZE) {  // Tahtadan taşmayacaksa
+                    for (int i = -1; i <= 1; i++) {
+                        for (int j = -1; j <= length; j++) {
+                            int checkX = x + i;
+                            int checkY = y + j;
+                            if (checkX >= 0 && checkX < GRID_SIZE && checkY >= 0 && checkY < GRID_SIZE) {
+                                if (player->grid[checkX][checkY] != 0) {
+                                    valid = 0;
+                                }
+                            }
+                        }
+                    }
+                    if (valid) {
+                        for (int i = 0; i < length; i++) {
+                            player->grid[x][y + i] = 1;
+                        }
+                        placed = 1;
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+void drawGrid(Display *display, Window window, GC gc, Player *player, int offsetX, int offsetY, const char *playerName) {
+    XFontStruct *font = XLoadQueryFont(display, "fixed");
+    if (!font) font = XLoadQueryFont(display, "6x13");
+
+    if (font) {
+        XSetFont(display, gc, font->fid);
+        XSetForeground(display, gc, BlackPixel(display, DefaultScreen(display)));
+        int textWidth = XTextWidth(font, playerName, strlen(playerName));
+        int textX = offsetX + (GRID_SIZE * CELL_SIZE - textWidth) / 2;
+        int textY = offsetY - 20;
+        XDrawString(display, window, gc, textX, textY, playerName, strlen(playerName));
+        XUnloadFont(display, font->fid);
+    }
+
+    for (int x = 0; x < GRID_SIZE; x++) {
+        for (int y = 0; y < GRID_SIZE; y++) {
+            unsigned long color;
+            if (player->grid[x][y] == 1) {
+                color = 0x0000FF;
+            } else if (player->grid[x][y] == 2) {
+                color = 0xFF0000;
+            } else if (player->grid[x][y] == 3) {
+                color = 0xCCCCCC;
+            } else {
+                color = 0xFFFFFF;
+            }
+            drawCell(display, window, gc, x + offsetX / CELL_SIZE, y + offsetY / CELL_SIZE, color);
+        }
+    }
+}
+
+void drawCell(Display *display, Window window, GC gc, int x, int y, unsigned long color) {
+    XSetForeground(display, gc, color);
+    XFillRectangle(display, window, gc, x * CELL_SIZE, y * CELL_SIZE, CELL_SIZE, CELL_SIZE);
+    XSetForeground(display, gc, BlackPixel(display, DefaultScreen(display)));
+    XDrawRectangle(display, window, gc, x * CELL_SIZE, y * CELL_SIZE, CELL_SIZE, CELL_SIZE);
+}
+
+int handleAttack(Player *attacker, Player *defender, int x, int y) {
+    if (defender->grid[x][y] == 1) {
+        defender->grid[x][y] = 2;
+        defender->shipsRemaining--;
+        return 1;
+    } else {
+        defender->grid[x][y] = 3;
+        return 0;
+    }
+}
+
+int checkGameOver(Player *player) {
+    return player->shipsRemaining <= 0;
+}
+
+int aiAttack(Player *player) {
+    static int lastHitX = -1, lastHitY = -1;
+    static int directions[4][2] = {{0, 1}, {1, 0}, {0, -1}, {-1, 0}};
+    static int currentDirection = 0;
+    static int searchingAroundLastHit = 0;
+
+    int x, y;
+
+    if (lastHitX != -1 && lastHitY != -1 && searchingAroundLastHit) {
+        // Continue trying the next direction around the last hit
+        for (int i = currentDirection; i < 4; i++) {
+            int newX = lastHitX + directions[i][0];
+            int newY = lastHitY + directions[i][1];
+
+            if (newX >= 0 && newX < GRID_SIZE && newY >= 0 && newY < GRID_SIZE && player->grid[newX][newY] < 2) {
+                currentDirection = (i + 1) % 4;
+                if (handleAttack(NULL, player, newX, newY)) {
+                    // Hit: update last hit coordinates and reset direction check
+                    lastHitX = newX;
+                    lastHitY = newY;
+                    currentDirection = 0;
+                    return 1;
+                } else {
+                    // Miss: continue trying the next direction
+                    continue;
+                }
+            }
+        }
+        // Exhausted all directions around the last hit
+        lastHitX = -1;
+        lastHitY = -1;
+        searchingAroundLastHit = 0;
+    }
+
+    // No recent hits to follow up; pick random coordinates
+    while (1) {
+        x = rand() % GRID_SIZE;
+        y = rand() % GRID_SIZE;
+
+        if (player->grid[x][y] < 2) {
+            if (handleAttack(NULL, player, x, y)) {
+                // Hit: store coordinates for follow-up search
+                lastHitX = x;
+                lastHitY = y;
+                currentDirection = 0;
+                searchingAroundLastHit = 1;
+                return 1;
+            } else {
+                // Miss: random attack was unsuccessful
+                return 0;
+            }
+        }
+    }
+}
+
+
+void displayWinScreen(Display *display, Window window, GC gc, const char *message) {
+    XClearWindow(display, window);
+    XSetForeground(display, gc, 0xFF0000);
+
+    XFontStruct *font = XLoadQueryFont(display, "fixed");
+    if (!font) {
+        font = XLoadQueryFont(display, "6x13");
+    }
+    if (font) {
+        XSetFont(display, gc, font->fid);
+
+        int textWidth = XTextWidth(font, message, strlen(message));
+        int x = (DisplayWidth(display, DefaultScreen(display)) - textWidth) / 2;
+        int y = DisplayHeight(display, DefaultScreen(display)) / 2 - BUTTON_HEIGHT;
+
+        XDrawString(display, window, gc, x, y, message, strlen(message));
+
+        int screenWidth = DisplayWidth(display, DefaultScreen(display));
+        int screenHeight = DisplayHeight(display, DefaultScreen(display));
+        int buttonX = (screenWidth - BUTTON_WIDTH) / 2;
+        int buttonY = screenHeight / 2;
+
+        XSetForeground(display, gc, 0x000000);
+        XDrawRectangle(display, window, gc, buttonX, buttonY, BUTTON_WIDTH, BUTTON_HEIGHT);
+
+        XSetForeground(display, gc, 0x00FF00);
+        XFillRectangle(display, window, gc, buttonX + 1, buttonY + 1, BUTTON_WIDTH - 2, BUTTON_HEIGHT - 2);
+
+        const char *exitText = "Return to Menu";
+        int exitTextWidth = XTextWidth(font, exitText, strlen(exitText));
+        int textX = buttonX + (BUTTON_WIDTH - exitTextWidth) / 2;
+        int textY = buttonY + (BUTTON_HEIGHT + font->ascent) / 2;
+        XSetForeground(display, gc, 0x000000);
+        XDrawString(display, window, gc, textX, textY, exitText, strlen(exitText));
+
+        XUnloadFont(display, font->fid);
+    } else {
+        printf("Font yüklenemedi, mesaj yazılamadı.\n");
+    }
+
+    XFlush(display);
+}
+
+int waitForExit(Display *display, Window window) {
+    int screenWidth = DisplayWidth(display, DefaultScreen(display));
+    int screenHeight = DisplayHeight(display, DefaultScreen(display));
+    int buttonX = (screenWidth - BUTTON_WIDTH) / 2;
+    int buttonY = screenHeight / 2;
+
+    while (1) {
+        XEvent event;
+        XNextEvent(display, &event);
+        if (event.type == ButtonPress) {
+            if (event.xbutton.x >= buttonX &&
+                event.xbutton.x <= buttonX + BUTTON_WIDTH &&
+                event.xbutton.y >= buttonY &&
+                event.xbutton.y <= buttonY + BUTTON_HEIGHT) {
+                return 1;  // Return to menu button pressed
+            }
+        }
+    }
+}
